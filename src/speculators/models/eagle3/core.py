@@ -88,11 +88,6 @@ class Eagle3DraftModel(DraftVocabMixin, SpeculatorModel):
         ]
         self.uses_sliding_window_attn = bool(self.sliding_window_indices)
         self.uses_full_attn = bool(num_layers - len(self.sliding_window_indices))
-        self._attn_sliding_windows: list[int | None] = []
-        if self.uses_full_attn:
-            self._attn_sliding_windows.append(None)
-        if self.uses_sliding_window_attn:
-            self._attn_sliding_windows.append(self.sliding_window)
 
         # ROTARY EMBEDDINGS
         # Create a modified config for the rotary embedding to use 2x the hidden size
@@ -123,14 +118,20 @@ class Eagle3DraftModel(DraftVocabMixin, SpeculatorModel):
         """Target layer IDs for auxiliary hidden states."""
         return self.config.eagle_aux_hidden_state_layer_ids
 
-    def _build_attention_masks(self, mask_mod_factory, seq_len, device):
-        masks = {}
-        for sw in self._attn_sliding_windows:
-            mask_mod = mask_mod_factory(sliding_window=sw)
-            masks[sw] = create_block_mask(
-                mask_mod, B=None, H=None, Q_LEN=seq_len, KV_LEN=seq_len, device=device
-            )
-        return masks.get(None), masks.get(self.sliding_window)
+    def _build_attn_mask(self, doc_ids_1d, seq_len, device, sliding_window=None):
+        mask_mod = create_combined_mask_mod(
+            doc_ids_1d,
+            seq_len,
+            sliding_window=sliding_window,
+        )
+        return self._create_mask_fn(
+            mask_mod,
+            B=None,
+            H=None,
+            Q_LEN=seq_len,
+            KV_LEN=seq_len,
+            device=device,
+        )
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
@@ -185,16 +186,24 @@ class Eagle3DraftModel(DraftVocabMixin, SpeculatorModel):
             ).unsqueeze(0)
             # shape: [1, total_seq_len]
 
-        past_key_values = DynamicCache(config=self.config.transformer_layer_config)
+        past_key_values = DynamicCache()
 
         doc_ids_1d = document_ids.squeeze(0).to(device)
 
-        full_attn_mask, sliding_window_attn_mask = self._build_attention_masks(
-            lambda sliding_window: create_combined_mask_mod(
-                doc_ids_1d, total_seq_len, sliding_window=sliding_window
-            ),
-            seq_len=total_seq_len,
-            device=device,
+        full_attn_mask = (
+            self._build_attn_mask(doc_ids_1d, total_seq_len, device)
+            if self.uses_full_attn
+            else None
+        )
+        sliding_window_attn_mask = (
+            self._build_attn_mask(
+                doc_ids_1d,
+                total_seq_len,
+                device,
+                self.sliding_window,
+            )
+            if self.uses_sliding_window_attn
+            else None
         )
 
         if self.input_norm is not None:

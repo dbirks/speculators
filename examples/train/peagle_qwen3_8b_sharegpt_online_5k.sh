@@ -50,6 +50,10 @@ NUM_LAYERS=4
 NUM_DEPTHS=4
 DOWN_SAMPLE_RATIO=0.7
 DOWN_SAMPLE_RATIO_MIN=0.2
+# Sliding window parameters (Qwen3 uses interleaved sliding/full attention)
+SLIDING_WINDOW=2048
+SLIDING_WINDOW_INDICES="0 1 2 3"
+
 # GPU assignments (online training needs separate GPUs for vLLM and training)
 VLLM_GPUS="2,3"
 TRAIN_GPUS="4,5"
@@ -69,7 +73,7 @@ python scripts/prepare_data.py \
 echo "=== Step 2: Launching vLLM server ==="
 CUDA_VISIBLE_DEVICES="$VLLM_GPUS" python scripts/launch_vllm.py "$MODEL" \
     --hidden-states-path "$OUTPUT_DIR/hidden_states" \
-    -- --data-parallel-size 2 --port "$VLLM_PORT" &
+    -- --data-parallel-size 2 --port "$VLLM_PORT" --gpu-memory-utilization 0.85 &
 VLLM_PID=$!
 
 # Ensure vLLM is cleaned up on exit
@@ -104,6 +108,8 @@ CUDA_VISIBLE_DEVICES="$TRAIN_GPUS" torchrun \
     --num-depths "$NUM_DEPTHS" \
     --down-sample-ratio "$DOWN_SAMPLE_RATIO" \
     --down-sample-ratio-min "$DOWN_SAMPLE_RATIO_MIN" \
+    --sliding-window "$SLIDING_WINDOW" \
+    --sliding-window-indices $SLIDING_WINDOW_INDICES \
     --no-norm-before-residual \
     --scheduler-type cosine \
     --on-missing generate \

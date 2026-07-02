@@ -3,6 +3,7 @@
 from typing import ClassVar
 
 import torch
+from torch.nn.attention.flex_attention import create_block_mask
 from transformers import PretrainedConfig
 
 from speculators.config import SpeculatorsConfig, VerifierConfig
@@ -129,15 +130,27 @@ class PEagleDraftModel(Eagle3DraftModel):
 
         doc_ids_1d = document_ids.squeeze(0).to(device)
 
-        full_attn_mask, sliding_window_attn_mask = self._build_attention_masks(
-            lambda sliding_window: create_peagle_mask_mod(
+        def _build_attn_mask(sliding_window=None):
+            mask_mod = create_peagle_mask_mod(
                 anchor_pos=anchor_pos,
                 depth=depth,
                 document_ids=doc_ids_1d,
                 sliding_window=sliding_window,
-            ),
-            seq_len=total_sampled,
-            device=device,
+            )
+            return create_block_mask(
+                mask_mod,
+                B=None,
+                H=None,
+                Q_LEN=total_sampled,
+                KV_LEN=total_sampled,
+                device=device,
+            )
+
+        full_attn_mask = _build_attn_mask() if self.uses_full_attn else None
+        sliding_window_attn_mask = (
+            _build_attn_mask(self.sliding_window)
+            if self.uses_sliding_window_attn
+            else None
         )
 
         hidden_states = layer_input

@@ -45,6 +45,10 @@ SEQ_LENGTH=8192
 EPOCHS=5
 LR=1e-4
 
+# Sliding window parameters (Qwen3 uses interleaved sliding/full attention)
+SLIDING_WINDOW=2048
+SLIDING_WINDOW_INDICES="0"
+
 # GPU assignments (online training needs separate GPUs for vLLM and training)
 VLLM_GPUS="0,1"
 TRAIN_GPUS="2,3"
@@ -63,7 +67,7 @@ python scripts/prepare_data.py \
 # Step 2: Launch vLLM server in the background
 echo "=== Step 2: Launching vLLM server ==="
 CUDA_VISIBLE_DEVICES="$VLLM_GPUS" python scripts/launch_vllm.py "$MODEL" \
-    -- --data-parallel-size 2 --port "$VLLM_PORT" &
+    -- --data-parallel-size 2 --port "$VLLM_PORT" --gpu-memory-utilization 0.85 &
 VLLM_PID=$!
 
 # Ensure vLLM is cleaned up on exit
@@ -93,6 +97,8 @@ CUDA_VISIBLE_DEVICES="$TRAIN_GPUS" torchrun \
     --epochs "$EPOCHS" \
     --lr "$LR" \
     --total-seq-len "$SEQ_LENGTH" \
+    --sliding-window "$SLIDING_WINDOW" \
+    --sliding-window-indices $SLIDING_WINDOW_INDICES \
     --on-missing generate \
     --on-generate delete
 

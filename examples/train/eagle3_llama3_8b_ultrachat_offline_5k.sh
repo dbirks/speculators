@@ -48,6 +48,10 @@ EPOCHS=5
 LR=1e-4
 CONCURRENCY=32                    # Parallel requests to vLLM during data generation
 
+# Sliding window parameters
+SLIDING_WINDOW=2048
+SLIDING_WINDOW_INDICES="0"
+
 # GPU assignments (offline reuses the same GPUs sequentially)
 GPUS="0,1"
 NUM_GPUS=2
@@ -65,7 +69,7 @@ python scripts/prepare_data.py \
 # Step 2: Launch vLLM server in the background
 echo "=== Step 2: Launching vLLM server ==="
 CUDA_VISIBLE_DEVICES="$GPUS" python scripts/launch_vllm.py "$MODEL" \
-    -- --data-parallel-size 2 --port "$VLLM_PORT" &
+    -- --data-parallel-size 2 --port "$VLLM_PORT" --gpu-memory-utilization 0.85 &
 VLLM_PID=$!
 
 echo "Waiting for vLLM server to be ready..."
@@ -103,6 +107,8 @@ CUDA_VISIBLE_DEVICES="$GPUS" torchrun \
     --epochs "$EPOCHS" \
     --lr "$LR" \
     --total-seq-len "$SEQ_LENGTH" \
+    --sliding-window "$SLIDING_WINDOW" \
+    --sliding-window-indices $SLIDING_WINDOW_INDICES \
     --on-missing raise
 
 echo "Done. Checkpoints saved to $OUTPUT_DIR/checkpoints/"
