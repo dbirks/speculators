@@ -139,6 +139,13 @@ async def wait_for_lock_async(lock_path, timeout=60.0, poll_interval=0.1):
         await asyncio.wait_for(_poll_lock_async(fd, poll_interval), timeout=timeout)
     except BaseException:
         os.close(fd)
+        # A timed-out wait means we're abandoning this sample either way --
+        # remove the lock file so it doesn't sit around forever and get
+        # mistaken for an in-progress write by a future sample.
+        try:
+            os.remove(lock_path)
+        except FileNotFoundError:
+            pass
         raise
     os.close(fd)
     os.remove(lock_path)
