@@ -4,6 +4,7 @@ import torch
 from torch import nn
 from torch.nn.attention.flex_attention import create_block_mask, create_mask
 from transformers import PretrainedConfig
+from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
 from transformers.models.qwen3.modeling_qwen3 import (
     Qwen3RMSNorm,
     Qwen3RotaryEmbedding,
@@ -11,6 +12,7 @@ from transformers.models.qwen3.modeling_qwen3 import (
 
 from speculators.model import DraftVocabMixin, SpeculatorModel
 from speculators.models.attention import create_float_mask
+from speculators.models.base_components import model_classes
 from speculators.models.dflash import DFlashSpeculatorConfig
 from speculators.models.dflash.attention import create_anchor_block_mask_mod
 from speculators.models.dflash.metrics import compute_metrics
@@ -21,6 +23,69 @@ from speculators.models.dflash.utils import (
 )
 from speculators.models.metrics import LossConfig, resolve_loss_config
 from speculators.models.utils import conditional_torch_compile, resolve_target_layer_ids
+
+
+# Rotary embedding classes that IGNORE partial_rotary_factor and always rotate the
+# full head dimension. Selecting one of these for a verifier that sets
+# partial_rotary_factor < 1.0 produces a train/serve mismatch (see issue #613).
+_FULL_ROTATION_ROTARY_CLASSES = (Qwen3RotaryEmbedding, LlamaRotaryEmbedding)
+
+
+def _partial_rotary_factor(config: "PretrainedConfig") -> float:
+    """Read ``partial_rotary_factor`` from a verifier config, matching vLLM.
+
+    vLLM computes ``rotary_dim = int(head_size * partial_rotary_factor)`` at serving
+    time. We look in ``rope_parameters`` / ``rope_scaling`` (transformers 5.x stores
+    it there) and then the top-level attribute, defaulting to ``1.0`` (full rotation).
+    """
+    for attr in ("rope_parameters", "rope_scaling"):
+        params = getattr(config, attr, None)
+        if isinstance(params, dict) and params.get("partial_rotary_factor") is not None:
+            return float(params["partial_rotary_factor"])
+    factor = getattr(config, "partial_rotary_factor", None)
+    return float(factor) if factor is not None else 1.0
+
+
+def _select_rotary_emb_class(config: "PretrainedConfig") -> type:
+    """Select a rotary embedding class that matches vLLM's serving behavior.
+
+    DFlash previously hardcoded ``Qwen3RotaryEmbedding``, which computes its rotary
+    dimension purely from ``head_dim`` and ignores ``partial_rotary_factor``. For
+    verifiers that set ``partial_rotary_factor < 1.0`` (Qwen3.5, Qwen3.6, Gemma4) this
+    rotates the full head at train time while vLLM only rotates
+    ``int(head_size * partial_rotary_factor)`` dims at serve time — a catastrophic
+    train/inference mismatch that tanks acceptance rate (issue #613).
+
+    We select the architecture's registered rotary class from ``model_classes`` (so a
+    Qwen3.5/3.6 verifier, model_type ``qwen3_5_text`` / ``qwen3_5_moe_text``, gets the
+    partial-rotary-aware ``Qwen3_5TextRotaryEmbedding`` / ``Qwen3_5MoeTextRotaryEmbedding``,
+    matching what ``transformers`` itself uses). As a safety net — covering a plain
+    ``partial_rotary_factor`` scalar with no ``mrope_section`` — if the verifier declares
+    ``partial_rotary_factor < 1.0`` but the registered class ignores it, we promote to a
+    partial-rotary-aware class so training still matches vLLM.
+    """
+    model_type = getattr(config, "model_type", None)
+    components = model_classes.get(model_type)
+    rotary_cls = (
+        components.rotary_emb_class if components is not None else Qwen3RotaryEmbedding
+    )
+
+    if (
+        _partial_rotary_factor(config) < 1.0
+        and rotary_cls in _FULL_ROTATION_ROTARY_CLASSES
+    ):
+        for key in ("qwen3_5_text", "qwen3_5_moe_text"):
+            partial_aware = model_classes.get(key)
+            if partial_aware is not None:
+                return partial_aware.rotary_emb_class
+        raise ValueError(
+            f"Verifier config (model_type={model_type!r}) sets partial_rotary_factor "
+            f"< 1.0, but the selected rotary embedding class {rotary_cls.__name__} "
+            f"ignores it and no partial-rotary-aware class is available. Install a "
+            f"transformers version providing qwen3_5 support to train DFlash/DSpark "
+            f"draft models for partial-rotary verifiers (see issue #613)."
+        )
+    return rotary_cls
 
 
 @SpeculatorModel.register("dflash")
@@ -88,7 +153,11 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
             config.transformer_layer_config.hidden_size,
             eps=config.transformer_layer_config.rms_norm_eps,  # type: ignore[arg-type]
         )
-        self.rotary_emb = Qwen3RotaryEmbedding(config.transformer_layer_config)  # type: ignore[arg-type]
+        # Select a rotary embedding class that respects partial_rotary_factor so that
+        # training matches vLLM's serving-time rotation dim (issue #613). DSpark
+        # subclasses DFlashDraftModel and inherits this unchanged.
+        rotary_cls = _select_rotary_emb_class(config.transformer_layer_config)
+        self.rotary_emb = rotary_cls(config.transformer_layer_config)  # type: ignore[arg-type]
 
         self.fc = nn.Linear(
             len(self.target_layer_ids) * config.transformer_layer_config.hidden_size,

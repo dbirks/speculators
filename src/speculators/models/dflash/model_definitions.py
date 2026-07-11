@@ -34,13 +34,42 @@ def apply_rotary_pos_emb(
     position_ids=None,  # noqa: ARG001
     unsqueeze_dim=1,
 ):
-    """Apply rotary position embeddings (local implementation)."""
+    """Apply rotary position embeddings (local implementation).
+
+    Supports partial rotary embeddings: only the first ``rotary_dim`` head
+    dimensions are rotated and the remainder pass through unchanged, where
+    ``rotary_dim = cos.shape[-1]``. This mirrors ``transformers``' Qwen3_5
+    ``apply_rotary_pos_emb`` (``q_rot, q_pass = q[..., :rotary_dim],
+    q[..., rotary_dim:]``) and matches vLLM's serving behavior, which rotates
+    ``int(head_size * partial_rotary_factor)`` dims for verifiers that set
+    ``partial_rotary_factor < 1.0`` (e.g. Qwen3.5/3.6, Gemma4). When
+    ``rotary_dim == head_dim`` (full rotation) this reduces exactly to the
+    original behavior, since ``q_pass`` is empty. See issue #613.
+
+    Note ``q`` and ``k`` may have different sequence lengths in DFlash: the
+    queries correspond to the trailing ``q_len`` mask-block positions, so the
+    query rotation uses the last ``q_len`` entries of ``cos``/``sin`` while the
+    keys (context + mask blocks) use the full length.
+    """
 
     cos = cos.unsqueeze(unsqueeze_dim)
     sin = sin.unsqueeze(unsqueeze_dim)
     q_len = q.size(-2)
-    q_embed = (q * cos[..., -q_len:, :]) + (_rotate_half(q) * sin[..., -q_len:, :])
-    k_embed = (k * cos) + (_rotate_half(k) * sin)
+
+    # Partial rotary: split the head dim into the rotated part and the pass-through
+    # part. rotary_dim is derived from the rotary embedding output (cos/sin) rather
+    # than the full head_dim.
+    rotary_dim = cos.shape[-1]
+    q_rot, q_pass = q[..., :rotary_dim], q[..., rotary_dim:]
+    k_rot, k_pass = k[..., :rotary_dim], k[..., rotary_dim:]
+
+    q_rot = (q_rot * cos[..., -q_len:, :]) + (
+        _rotate_half(q_rot) * sin[..., -q_len:, :]
+    )
+    k_rot = (k_rot * cos) + (_rotate_half(k_rot) * sin)
+
+    q_embed = torch.cat([q_rot, q_pass], dim=-1)
+    k_embed = torch.cat([k_rot, k_pass], dim=-1)
     return q_embed, k_embed
 
 
