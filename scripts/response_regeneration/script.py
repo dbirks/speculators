@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import os
+import random
 import re
 import sys
 from typing import Any
@@ -34,6 +35,17 @@ DATASET_CONFIGS = {
         "prompt_field": "question",
         "default_split": "train",
         "subset": "main",
+    },
+    "opc-python": {
+        "id": "OpenCoder-LLM/opc-sft-stage2",
+        "prompt_field": "instruction",
+        "default_split": "train",
+        "subset": "evol_instruct",
+    },
+    "typescript-instruct": {
+        "id": "bleugreen/typescript-instruct",
+        "prompt_field": "instruction",
+        "default_split": "train",
     },
 }
 
@@ -109,9 +121,23 @@ def parse_args():
             f"(default: {DEFAULT_MAX_RETRIES})"
         ),
     )
+    parser.add_argument(
+        "--enable-thinking-fraction",
+        type=float,
+        default=0.0,
+        help=(
+            "Fraction of conversations (0.0-1.0) to regenerate with the "
+            "model's thinking mode enabled (chat_template_kwargs.enable_thinking), "
+            "so the drafter sees some real <think>-block structure. Applied "
+            "per-conversation, not per-turn, so a whole conversation is "
+            "consistently thinking or non-thinking."
+        ),
+    )
     args = parser.parse_args()
     if args.max_retries < 0:
         parser.error("--max-retries must be >= 0")
+    if not 0.0 <= args.enable_thinking_fraction <= 1.0:
+        parser.error("--enable-thinking-fraction must be between 0.0 and 1.0")
     return args
 
 
@@ -314,6 +340,7 @@ async def worker(
         idx = item["idx"]
         turns = item["turns"]
         conv_id = item["primary_id"]
+        use_thinking = item.get("use_thinking", False)
 
         prefix: list[dict[str, Any]] = []
         samples: list[dict[str, Any]] = []
@@ -330,6 +357,7 @@ async def worker(
                     "messages": prefix,
                     "max_tokens": args.max_tokens,
                     "return_token_ids": True,  # prompt_token_ids + completion token_ids
+                    "chat_template_kwargs": {"enable_thinking": use_thinking},
                 }
                 data = await _post_chat(
                     session,
@@ -374,6 +402,7 @@ async def worker(
                             "finish_reason": choice.get("finish_reason"),
                             "usage": data.get("usage") or {},
                             "endpoint": endpoint,
+                            "use_thinking": use_thinking,
                         },
                     }
                 )
@@ -515,6 +544,9 @@ async def main():
                         "idx": index,
                         "primary_id": primary_id,
                         "turns": turns,
+                        # Decided once per conversation (not per turn) so a
+                        # whole conversation is consistently thinking or not.
+                        "use_thinking": random.random() < args.enable_thinking_fraction,
                     }
                 )
                 processed_count += 1
